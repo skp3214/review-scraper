@@ -333,7 +333,7 @@ export default function ReviewScraperApp() {
                         <li>Product not found on the selected platform</li>
                       </ul>
                       <div className="mt-2 text-sm">
-                        Try using the "Mock (Demo)" source to test the interface.
+                        Try using the "Other" source to test the interface.
                       </div>
                     </div>
                   )}
