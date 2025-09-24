@@ -1,5 +1,5 @@
 import { BaseSource, SourceError } from "./base.js"
-import { fetchWithRetry, parseDateFlexible, stripText, jitteredDelay } from "../utils.js"
+import { fetchWithRetry, parseDateFlexible, stripText, jitteredDelay, formatHtml, extractJsonFromHtml } from "../utils.js"
 
 const CAPTERRA_BASE = "https://www.capterra.com"
 
@@ -16,7 +16,7 @@ export class CapterraSource extends BaseSource {
     // Direct URL mapping for known products using Capterra product IDs
     const directMappings = {
       'notion': '186596',
-      'slack': '158654', 
+      'slack': '135003', 
       'zoom': '162994',
       'monday.com': '157846',
       'monday': '157846',
@@ -66,13 +66,65 @@ export class CapterraSource extends BaseSource {
     }
   }
 
-  _parseReviewsOnPage(html, pageUrl) {
-    const blocks = html.includes("review-card")
-      ? html.split(/(?=<div[^>]+class="[^"]*review-card)/i)
-      : html.split(/(?=<article )/i)
-
+  async _parseReviewsOnPage(html, pageUrl) {
     const out = []
-    for (const block of blocks) {
+    
+    console.log('[Capterra] Attempting JSON extraction using jsdom parser...');
+    
+    // Try to extract JSON data using jsdom parser
+    try {
+      const reviewsData = await extractJsonFromHtml(html);
+      
+      if (reviewsData && reviewsData.length > 0) {
+        console.log(`[Capterra] Successfully extracted ${reviewsData.length} reviews from JSON data`);
+        
+        for (const review of reviewsData) {
+          if (review.title && (review.generalComments || review.prosText || review.consText)) {
+            const rating = review.overallRating ? parseFloat(review.overallRating) : null;
+            const date = review.writtenOn ? new Date(review.writtenOn).toISOString().slice(0, 10) : "";
+            
+            let description = "";
+            if (review.generalComments) description += review.generalComments + " ";
+            if (review.prosText) description += "Pros: " + review.prosText + " ";
+            if (review.consText) description += "Cons: " + review.consText + " ";
+            
+            const reviewer = review.reviewer ? 
+              `${review.reviewer.fullName || 'Anonymous'} - ${review.reviewer.jobTitle || ''} (${review.reviewer.industry || ''}, ${review.reviewer.companySize || ''})`.trim() :
+              'Anonymous';
+            
+            out.push({
+              title: stripText(review.title),
+              description: stripText(description.trim()),
+              date: date,
+              rating: rating,
+              reviewer: stripText(reviewer),
+              url: pageUrl,
+              source: this.name,
+              product: pageUrl.includes('/') ? pageUrl.split('/').find(p => p && !p.includes('.')) : 'Unknown',
+              extra: {
+                verified: review.reviewer?.isValidated || false
+              }
+            });
+          }
+        }
+        
+        if (out.length > 0) {
+          console.log(`[Capterra] Successfully parsed ${out.length} reviews from JSON data`);
+          return out;
+        }
+      }
+    } catch (error) {
+      console.log(`[Capterra] jsdom JSON extraction failed: ${error.message}`);
+    }
+
+    // Fallback to HTML parsing if JSON extraction fails or produces no results
+    if (out.length === 0) {
+      console.log('[Capterra] Using fallback HTML parsing...');
+      const blocks = html.includes("review-card")
+        ? html.split(/(?=<div[^>]+class="[^"]*review-card)/i)
+        : html.split(/(?=<article )/i)
+
+      for (const block of blocks) {
       // Title
       let title = null
       let m = block.match(/<h[23][^>]*class="[^"]*(?:title|heading)[^"]*"[^>]*>([\s\S]*?)<\/h[23]>/i)
@@ -127,21 +179,48 @@ export class CapterraSource extends BaseSource {
         })
       }
     }
+    
+    console.log(`[Capterra] Fallback HTML extraction found ${out.length} reviews`);
+    }
     return out
   }
 
   async *iterReviews(reviewsUrl, _start, _end, maxPages = 25) {
-    for (let page = 1; page <= maxPages; page++) {
-      const url = `${reviewsUrl}?page=${page}`
-      const html = await fetchWithRetry(url)
-      const items = this._parseReviewsOnPage(html, url)
-      let countOnPage = 0
-      for (const r of items) {
-        countOnPage += 1
-        yield r
+    const { writeFile } = await import('node:fs/promises')
+    const { resolve } = await import('node:path')
+    
+    // Only fetch the main reviews page (no ?page=1 etc)
+    const url = reviewsUrl;
+    const html = await fetchWithRetry(url, {
+      headers: {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+      },
+      zenRowsParams: {
+        'proxy_country': 'us',
+        'premium_proxy': 'true',
+        'js_render': 'true'
       }
-      if (countOnPage === 0) break
-      await jitteredDelay()
+    });
+    
+    // Save raw HTML to root folder (like G2 and TrustRadius)
+    const htmlPath = resolve(process.cwd(), 'capterra-main.html');
+    await writeFile(htmlPath, html, { encoding: 'utf-8' });
+    console.log(`[Capterra] HTML saved to ${htmlPath} (${html.length} chars)`);
+    
+    // Extract reviews from HTML
+    const items = await this._parseReviewsOnPage(html, url);
+    
+    // Save extracted reviews to JSON file in root folder (like G2 and TrustRadius)
+    const jsonPath = resolve(process.cwd(), 'capterra-reviews.json');
+    await writeFile(jsonPath, JSON.stringify(items, null, 2), { encoding: 'utf-8' });
+    console.log(`[Capterra] Reviews saved to ${jsonPath} (${items.length} reviews)`);
+    
+    // Yield each review
+    for (const r of items) {
+      yield r;
     }
   }
 }
