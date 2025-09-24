@@ -1,5 +1,6 @@
 import { BaseSource, SourceError } from "./base.js"
-import { fetchWithRetry, parseDateFlexible, stripText, jitteredDelay } from "../utils.js"
+import { fetchWithRetry, parseDateFlexible, stripText, jitteredDelay, extractJsonFromHtml } from "../utils.js"
+import * as cheerio from 'cheerio'
 
 const G2_BASE = "https://www.g2.com"
 
@@ -34,7 +35,7 @@ export class G2Source extends BaseSource {
     
     // Test if the URL is accessible by making a quick request
     try {
-      // First try without page parameter
+      // First try without page parameter - explicitly ensure US proxy for G2
       const testHtml = await fetchWithRetry(reviewsUrl, {
         headers: {
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -42,6 +43,12 @@ export class G2Source extends BaseSource {
           'Connection': 'keep-alive',
           'Upgrade-Insecure-Requests': '1',
           'Referer': 'https://www.g2.com/',
+        },
+        // Explicitly ensure US proxy for G2 to avoid geo-restrictions
+        zenRowsParams: {
+          'proxy_country': 'us',
+          'premium_proxy': 'true',
+          'js_render': 'true'
         }
       })
       
@@ -73,7 +80,198 @@ export class G2Source extends BaseSource {
     }
   }
 
-  _parseReviewsOnPage(html, pageUrl) {
+  async _parseReviewsOnPage(html, pageUrl) {
+    const out = []
+    
+    console.log('[G2] Attempting JSON extraction using jsdom parser...');
+    
+    // First try to extract JSON data using jsdom parser (like Capterra)
+    try {
+      const reviewsData = await extractJsonFromHtml(html);
+      
+      if (reviewsData && reviewsData.length > 0) {
+        console.log(`[G2] Successfully extracted ${reviewsData.length} reviews from JSON data`);
+        
+        for (const review of reviewsData) {
+          // Adapt to G2's JSON structure (may have different field names)
+          if ((review.title || review.headline || review.review_title) && 
+              (review.content || review.body || review.review_content || review.description)) {
+            
+            const rating = review.rating ? parseFloat(review.rating) : 
+                          review.score ? parseFloat(review.score) : null;
+            const date = review.date || review.created_at || review.review_date || "";
+            
+            let description = review.content || review.body || review.review_content || review.description || "";
+            let title = review.title || review.headline || review.review_title || "User Review";
+            
+            const reviewer = review.reviewer ? 
+              (typeof review.reviewer === 'string' ? review.reviewer : 
+               review.reviewer.name || review.reviewer.display_name || 'Anonymous') :
+              review.author || review.user || 'Anonymous';
+            
+            out.push({
+              title: stripText(title),
+              description: stripText(description),
+              date: date,
+              rating: rating,
+              reviewer: stripText(reviewer),
+              url: pageUrl,
+              source: this.name,
+              product: pageUrl.includes('/') ? pageUrl.split('/').find(p => p && !p.includes('.')) : 'Unknown',
+              extra: {
+                verified: review.verified || false
+              }
+            });
+          }
+        }
+        
+        if (out.length > 0) {
+          console.log(`[G2] Successfully parsed ${out.length} reviews from JSON data`);
+          return out;
+        }
+      }
+    } catch (error) {
+      console.log(`[G2] jsdom JSON extraction failed: ${error.message}`);
+    }
+
+    // Fallback to Cheerio-based HTML parsing if JSON extraction fails
+    if (out.length === 0) {
+      console.log('[G2] Using fallback Cheerio-based HTML parsing...');
+      return this._parseReviewsWithCheerio(html, pageUrl);
+    }
+    
+    return out;
+  }
+
+  _parseReviewsWithCheerio(html, pageUrl) {
+    // Use improved G2 extraction logic with better content filtering
+    try {
+      const $ = cheerio.load(html);
+      const reviews = [];
+
+      console.log(`[G2] Extracting reviews from HTML using Cheerio targeting...`);
+
+      // Look for review content in various G2 patterns
+      const contentSelectors = [
+        'div[data-testid*="review"]',  // Modern G2 review containers
+        'article[data-testid*="review"]',
+        '.review-content',
+        '.user-review',
+        'div.review-text',
+        'p.elv-tracking-normal.elv-text-default'  // Original selector
+      ];
+      
+      let reviewCount = 0;
+      
+      for (const selector of contentSelectors) {
+        $(selector).each((i, el) => {
+          const $el = $(el);
+          const text = $el.text().trim();
+          
+          // Skip if already processed or too short/long
+          if (text.length < 50 || text.length > 2000) return;
+          
+          // Filter out promotional/navigation content more aggressively
+          const isNonReviewContent = 
+            text.includes('Thousands of people') || 
+            text.includes('come to G2 to find out') ||
+            text.includes('Share your real experiences') ||
+            text.includes('Product Details') ||
+            text.includes('CancelDone') ||
+            text.includes('LinkedIn®') ||
+            text.includes('Visit Website') ||
+            text.includes('Product Website') ||
+            text.includes('Languages Supported') ||
+            text.includes('Pricing provided by') ||
+            text.includes('Show More') ||
+            text.includes('View More Pricing') ||
+            text.includes('What do users say about') ||
+            text.includes('Integrations') ||
+            text.match(/^\s*[\d.]+\s*$/) || // Just numbers/ratings
+            text.includes('Overview by') ||
+            text.includes('Head of Marketing') ||
+            text.startsWith('Seller') ||
+            text.startsWith('Discussions');
+          
+          // Check for genuine user review patterns - more specific
+          const hasGenuineReviewContent = 
+            (text.includes('experience') && (text.includes('using') || text.includes('with'))) ||
+            (text.includes('recommend') && text.includes('software')) ||
+            (text.includes('pros') && text.includes('cons')) ||
+            (text.includes('love') && text.includes('feature')) ||
+            (text.includes('helps') && text.includes('team')) ||
+            (text.includes('easy to') && text.includes('use')) ||
+            (text.includes('great') && text.includes('tool')) ||
+            (text.includes('workflow') && text.includes('productivity')) ||
+            (text.match(/\b(I|we|our team|my team)\b.*\b(use|used|find|found)\b/i));
+
+          if (!isNonReviewContent && hasGenuineReviewContent) {
+            // Clean up content more thoroughly
+            let cleanContent = text
+              .replace(/\s*Review collected by and hosted on G2\.com\.\s*$/i, '')
+              .replace(/\s*Visit Website\s*/g, ' ')
+              .replace(/\s*Product Website\s*/g, ' ')
+              .replace(/\s*Show More\s*/g, ' ')
+              .replace(/\s*CancelDone\s*/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+            
+            // Extract a reasonable title from the first sentence or question
+            let title = 'User Review';
+            const firstSentence = cleanContent.split(/[.!?]/)[0];
+            if (firstSentence && firstSentence.length < 100) {
+              title = firstSentence.trim();
+            }
+            
+            // Ensure content is substantial
+            if (cleanContent.length > 50 && cleanContent.length < 1000) {
+              reviews.push({
+                title: title,
+                description: cleanContent,
+                date: '',
+                rating: null,
+                reviewer: 'Anonymous',
+                url: pageUrl,
+                source: this.name,
+                product: pageUrl.split('/products/')[1] ? pageUrl.split('/products/')[1].split('/')[0] : 'Unknown',
+                extra: {}
+              });
+              reviewCount++;
+            }
+          }
+        });
+        
+        if (reviewCount > 0) {
+          console.log(`[G2] Found ${reviewCount} reviews using selector: ${selector}`);
+          break; // Use the first selector that finds reviews
+        }
+      }
+
+      // Deduplicate reviews by content
+      const uniqueReviews = [];
+      const seenContent = new Set();
+      
+      for (const review of reviews) {
+        const contentHash = review.description.slice(0, 100); // Use first 100 chars as hash
+        if (!seenContent.has(contentHash)) {
+          seenContent.add(contentHash);
+          uniqueReviews.push(review);
+        }
+      }
+
+      console.log(`[G2] Extracted ${uniqueReviews.length} unique genuine reviews using Cheerio targeting`);
+      return uniqueReviews;
+
+    } catch (error) {
+      console.error('[G2] Error in Cheerio extraction, falling back to original method:', error.message);
+      
+      // Fallback to original method if improved extraction fails
+      return this._parseReviewsOnPageOriginal(html, pageUrl);
+    }
+  }
+
+  _parseReviewsOnPageOriginal(html, pageUrl) {
+    // Original parsing logic as backup
     console.log(`[G2] Parsing reviews from ${pageUrl}`)
     
     const blocks = Array.from(this._splitBlocks(html))
@@ -200,19 +398,43 @@ export class G2Source extends BaseSource {
     return out
   }
 
-  async *iterReviews(reviewsUrl, start, end, maxPages = 25) {
-    for (let page = 1; page <= maxPages; page++) {
-      const url = `${reviewsUrl}?page=${page}`
-      const html = await fetchWithRetry(url)
-      let countOnPage = 0
-      const items = this._parseReviewsOnPage(html, url)
-      for (const r of items) {
-        countOnPage += 1
-        // soft filter here; final filter happens in runner
-        yield r
+  async *iterReviews(reviewsUrl, _start, _end, maxPages = 25) {
+    const { writeFile } = await import('node:fs/promises')
+    const { resolve } = await import('node:path')
+    
+    // Only fetch the main reviews page (no pagination like Capterra)
+    const url = reviewsUrl;
+    const html = await fetchWithRetry(url, {
+      headers: {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Referer': 'https://www.g2.com/',
+      },
+      zenRowsParams: {
+        'proxy_country': 'us',
+        'premium_proxy': 'true',
+        'js_render': 'true'
       }
-      if (countOnPage === 0) break
-      await jitteredDelay()
+    });
+    
+    // Save raw HTML to root folder (like Capterra and TrustRadius)
+    const htmlPath = resolve(process.cwd(), 'g2-main.html');
+    await writeFile(htmlPath, html, { encoding: 'utf-8' });
+    console.log(`[G2] HTML saved to ${htmlPath} (${html.length} chars)`);
+    
+    // Parse reviews from the saved HTML
+    const items = await this._parseReviewsOnPage(html, url);
+    
+    // Save extracted reviews to JSON file in root folder (like Capterra and TrustRadius)
+    const jsonPath = resolve(process.cwd(), 'g2-reviews.json');
+    await writeFile(jsonPath, JSON.stringify(items, null, 2), { encoding: 'utf-8' });
+    console.log(`[G2] Reviews saved to ${jsonPath} (${items.length} reviews)`);
+    
+    // Yield each review
+    for (const r of items) {
+      yield r;
     }
   }
 }
