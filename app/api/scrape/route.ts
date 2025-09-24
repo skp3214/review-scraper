@@ -22,95 +22,52 @@ export async function POST(request: NextRequest) {
     console.log(`[API] Scraping ${source} for ${company} from ${startDate} to ${endDate}`)
 
     try {
-      // Try to use the actual scraping script
+      // Use scraping script to save directly to final output file
       const scriptPath = path.join(process.cwd(), 'scripts', 'js', 'scrape-reviews.js')
-      const outputPath = path.join(process.cwd(), `temp-${Date.now()}.json`)
+      const outputPath = path.join(process.cwd(), `${source}-reviews.json`)
       
-      const command = `node "${scriptPath}" --company "${company}" --start ${startDate} --end ${endDate} --source ${source} --out "${outputPath}" --max-pages 5`
+      const command = `node "${scriptPath}" --company "${company}" --start ${startDate} --end ${endDate} --source ${source} --out "${outputPath}" --max-pages 1`
       
-      console.log(`[API] Running: ${command}`)
+      console.log(`[API] Running scraper: ${command}`)
       
       const { stdout, stderr } = await execAsync(command, {
-        timeout: 60000, // 60 second timeout
+        timeout: 90000, // 90 second timeout
         cwd: process.cwd()
       })
       
-      console.log(`[API] Script output: ${stdout}`)
-      if (stderr) console.error(`[API] Script errors: ${stderr}`)
+      console.log(`[API] Scraper output: ${stdout}`)
+      if (stderr) console.error(`[API] Scraper errors: ${stderr}`)
       
-      // Read the output file
-      if (fs.existsSync(outputPath)) {
-        const fileContent = fs.readFileSync(outputPath, 'utf-8')
-        const reviews = JSON.parse(fileContent)
-        
-        // Clean up temp file
-        fs.unlinkSync(outputPath)
-        
-        return NextResponse.json({
-          success: true,
-          message: `Successfully scraped ${reviews.length} reviews for ${company} from ${source}`,
-          reviews: reviews,
-          metadata: {
-            company,
-            source,
-            dateRange: `${startDate} to ${endDate}`,
-            totalFound: reviews.length,
-            method: 'real-scraping'
-          }
-        })
-      } else {
-        throw new Error('Output file not created')
+      // Check if the output file was created
+      if (!fs.existsSync(outputPath)) {
+        throw new Error(`Reviews file not created at ${outputPath}`)
       }
+      
+      // Read the reviews from the output file
+      const fileContent = fs.readFileSync(outputPath, 'utf-8')
+      const reviews = JSON.parse(fileContent)
+      
+      return NextResponse.json({
+        success: true,
+        message: `Successfully scraped ${reviews.length} reviews for ${company} from ${source}`,
+        reviews: reviews,
+        metadata: {
+          company,
+          source,
+          dateRange: `${startDate} to ${endDate}`,
+          totalFound: reviews.length,
+          scrapedAt: new Date().toISOString()
+        }
+      })
       
     } catch (scrapeError: any) {
       console.error(`[API] Real scraping failed: ${scrapeError?.message || scrapeError}`)
       
-      // Fallback to mock data only if user explicitly requests it
-      if (source === 'mock') {
-        const mockReviews = [
-          {
-            title: "Excellent product for productivity",
-            description: "This tool has significantly improved our team's workflow. The interface is intuitive and the features are well-designed.",
-            date: startDate,
-            rating: 4.5,
-            reviewer: "Product Manager",
-            url: `https://mock.example.com/products/${company.toLowerCase()}/reviews`,
-            source: source,
-            product: company,
-            extra: {}
-          },
-          {
-            title: "Good value for money", 
-            description: "We've been using this for 6 months. It does what it promises and the customer support is responsive.",
-            date: new Date(new Date(startDate).getTime() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-            rating: 4.0,
-            reviewer: "IT Director",
-            url: `https://mock.example.com/products/${company.toLowerCase()}/reviews`,
-            source: source,
-            product: company,
-            extra: {}
-          }
-        ]
-
-        return NextResponse.json({
-          success: true,
-          message: `Mock data: Found ${mockReviews.length} sample reviews for ${company}`,
-          reviews: mockReviews,
-          metadata: {
-            company,
-            source,
-            dateRange: `${startDate} to ${endDate}`,
-            totalFound: mockReviews.length,
-            method: 'mock-data'
-          }
-        })
-      } else {
-        return NextResponse.json({
-          success: false,
-          error: `Real scraping failed for ${source}: ${scrapeError?.message || scrapeError}. This is common due to anti-bot protection. Try using 'mock' source for testing.`,
-          suggestion: "Real web scraping often encounters anti-bot measures. For reliable testing, use the 'Mock (Demo)' source option."
-        }, { status: 422 })
-      }
+      return NextResponse.json({
+        success: false,
+        error: `Real scraping failed for ${source}: ${scrapeError?.message || scrapeError}. This is common due to anti-bot protection.`,
+        suggestion: "Real web scraping often encounters anti-bot measures. Try another source or check the logs."
+      }, { status: 422 })
     }
 
   } catch (error: any) {

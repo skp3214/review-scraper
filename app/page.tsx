@@ -81,7 +81,7 @@ export default function ReviewScraperApp() {
         <CardHeader>
           <CardTitle>SaaS Review Scraper</CardTitle>
           <CardDescription>
-            Scrape product reviews from G2, Capterra, and GetApp
+            Scrape product reviews from G2, Capterra, and TrustRadius
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -124,8 +124,7 @@ export default function ReviewScraperApp() {
               <SelectContent>
                 <SelectItem value="g2">G2 (Real Scraping)</SelectItem>
                 <SelectItem value="capterra">Capterra (Real Scraping)</SelectItem>
-                <SelectItem value="getapp">GetApp (Real Scraping)</SelectItem>
-                <SelectItem value="mock">Mock (Demo/Testing)</SelectItem>
+                <SelectItem value="trustradius">TrustRadius (Real Scraping)</SelectItem>
               </SelectContent>
             </Select>
             <div className="text-xs text-gray-500 mt-1">
@@ -163,19 +162,45 @@ export default function ReviewScraperApp() {
                 </div>
               ) : (
                 <div className="space-y-4">
-                  <div className={`p-4 border rounded ${results.metadata?.method === 'real-scraping' ? 'bg-green-50 border-green-200' : 'bg-blue-50 border-blue-200'}`}>
-                    <div className={`font-medium ${results.metadata?.method === 'real-scraping' ? 'text-green-800' : 'text-blue-800'}`}>
+                  <div className={`p-4 border rounded ${
+                    results.metadata?.method === 'real-scraping' || results.metadata?.method === 'html-extraction' 
+                      ? 'bg-green-50 border-green-200' 
+                      : 'bg-blue-50 border-blue-200'
+                  }`}>
+                    <div className={`font-medium ${
+                      results.metadata?.method === 'real-scraping' || results.metadata?.method === 'html-extraction'
+                        ? 'text-green-800' 
+                        : 'text-blue-800'
+                    }`}>
                       {results.message}
-                      {results.metadata?.method === 'real-scraping' && " ✅ (Real Data)"}
+                      {(results.metadata?.method === 'real-scraping' || results.metadata?.method === 'html-extraction') && " ✅ (Real Data)"}
                       {results.metadata?.method === 'mock-data' && " 🎭 (Mock Data)"}
                     </div>
                     {results.metadata && (
-                      <div className={`text-sm mt-2 ${results.metadata?.method === 'real-scraping' ? 'text-green-600' : 'text-blue-600'}`}>
+                      <div className={`text-sm mt-2 ${
+                        results.metadata?.method === 'real-scraping' || 
+                        results.metadata?.method === 'html-extraction' ||
+                        results.metadata?.method === 'multi-source'
+                          ? 'text-green-600' 
+                          : 'text-blue-600'
+                      }`}>
                         <div>Company: {results.metadata.company}</div>
                         <div>Source: {results.metadata.source}</div>
                         <div>Date Range: {results.metadata.dateRange}</div>
                         <div>Reviews Found: {results.metadata.totalFound}</div>
-                        <div>Method: {results.metadata.method === 'real-scraping' ? 'Real Web Scraping' : 'Mock/Demo Data'}</div>
+                        <div>Method: {
+                          results.metadata.method === 'html-extraction' 
+                            ? 'HTML Extraction (ZenRows + Cheerio)' 
+                            : results.metadata.method === 'real-scraping' 
+                            ? 'Real Web Scraping' 
+                            : 'Demo Data'
+                        }</div>
+                        {results.metadata.htmlSaved && (
+                          <div className="text-xs mt-1 opacity-75">HTML saved: {results.metadata.htmlSaved}</div>
+                        )}
+                        {results.metadata.jsonSaved && (
+                          <div className="text-xs opacity-75">JSON saved: {results.metadata.jsonSaved}</div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -198,18 +223,45 @@ export default function ReviewScraperApp() {
                             <h4 className="font-medium">{review.title}</h4>
                             <div className="flex items-center gap-2">
                               {review.rating && (
-                                <span className="text-sm text-gray-500">{review.rating}/5</span>
+                                <span className="text-sm font-medium text-yellow-600">★ {review.rating}/5</span>
                               )}
                               <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">
-                                {review.source}
+                                {review.source || results.metadata?.source}
                               </span>
                             </div>
                           </div>
-                          <p className="text-gray-700 mb-2">{review.description}</p>
-                          <div className="text-sm text-gray-500 flex justify-between">
-                            <span>By: {review.reviewer || 'Anonymous'}</span>
+                          <p className="text-gray-700 mb-3">{review.body || review.description}</p>
+                          
+                          {/* Show pros and cons if available */}
+                          {(review.pros || review.cons) && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+                              {review.pros && (
+                                <div className="p-2 bg-green-50 border border-green-200 rounded">
+                                  <div className="text-xs font-medium text-green-800 mb-1">👍 PROS</div>
+                                  <div className="text-sm text-green-700">{review.pros}</div>
+                                </div>
+                              )}
+                              {review.cons && (
+                                <div className="p-2 bg-red-50 border border-red-200 rounded">
+                                  <div className="text-xs font-medium text-red-800 mb-1">👎 CONS</div>
+                                  <div className="text-sm text-red-700">{review.cons}</div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          
+                          <div className="text-sm text-gray-500 flex flex-col sm:flex-row sm:justify-between gap-1">
+                            <span>By: {review.author || review.reviewer || 'Anonymous'}</span>
                             <span>{review.date}</span>
                           </div>
+                          
+                          {/* Show additional info if available */}
+                          {review.additionalInfo && (
+                            <div className="text-xs text-gray-400 mt-2 border-t pt-2">
+                              {review.additionalInfo}
+                            </div>
+                          )}
+                          
                           {review.url && (
                             <div className="text-xs text-blue-600 mt-1">
                               <a href={review.url} target="_blank" rel="noopener noreferrer" className="hover:underline">
